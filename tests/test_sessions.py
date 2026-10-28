@@ -51,7 +51,7 @@ def test_practice_lifecycle_keeps_answer_hidden_until_transcription(engine, tmp_
 
 
 def test_aborted_practice_is_not_reported_as_completed(engine, tmp_path):
-    q = generate_question(QuestionOptions(count=1, seed=5))
+    q = generate_question(QuestionOptions(pattern="[あいうえお]{2}", count=1, seed=5))
     audio = render_audio(q, AudioSettings(), engine.client, engine.voice)
     session = PracticeSession.create(tmp_path, q, audio)
     session.start_playback()
@@ -62,7 +62,7 @@ def test_aborted_practice_is_not_reported_as_completed(engine, tmp_path):
 
 
 def test_failed_creation_cleans_up_only_its_own_directory(engine, tmp_path, monkeypatch):
-    q = generate_question(QuestionOptions(count=1, seed=5))
+    q = generate_question(QuestionOptions(pattern="[あいうえお]{2}", count=1, seed=5))
     audio = render_audio(q, AudioSettings(), engine.client, engine.voice)
     old = tmp_path / "existing"
     old.mkdir()
@@ -83,7 +83,7 @@ def test_failed_creation_cleans_up_only_its_own_directory(engine, tmp_path, monk
 def test_failed_transition_can_be_retried_without_claiming_completion(
     engine, tmp_path, monkeypatch
 ):
-    question = generate_question(QuestionOptions(count=1, seed=5))
+    question = generate_question(QuestionOptions(pattern="[あいうえお]{2}", count=1, seed=5))
     audio = render_audio(question, AudioSettings(), engine.client, engine.voice)
     session = PracticeSession.create(tmp_path, question, audio)
     session.start_playback()

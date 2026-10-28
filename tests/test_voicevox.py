@@ -110,7 +110,7 @@ def test_actual_duration_limit_is_checked_before_allocating_pause_audio(engine):
 
 
 def test_cancel_is_checked_between_api_requests(engine):
-    q = generate_question(QuestionOptions(count=2, seed=1))
+    q = generate_question(QuestionOptions(pattern="[あいうえお]{2}", count=2, seed=1))
     cancel = threading.Event()
 
     def progress(_fraction, message):

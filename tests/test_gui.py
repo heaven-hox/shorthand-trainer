@@ -29,7 +29,7 @@ def test_gui_full_practice_with_http_engine_and_test_audio(engine, tmp_path, mon
     monkeypatch.setattr(gui.messagebox, "showerror", lambda *_a, **_k: errors.append(_a))
     root = tk.Tk()
     root.withdraw()
-    app = gui.Application(root)
+    app = gui.Application(root, settings_path=tmp_path / "settings.json")
 
     def until(predicate):
         deadline = time.monotonic() + 10
@@ -42,6 +42,7 @@ def test_gui_full_practice_with_http_engine_and_test_audio(engine, tmp_path, mon
         app.engine_url.set(engine.url)
         app.log_root.set(str(tmp_path / "日本語 の 記録"))
         app.count.set("3")
+        app.pattern.set("[あいうえお]{2}")
         app.seed.set("45")
         app.connect_button.invoke()
         until(lambda: not app.busy)
@@ -90,3 +91,100 @@ def test_gui_full_practice_with_http_engine_and_test_audio(engine, tmp_path, mon
         assert not errors
     finally:
         app.close()
+
+
+def test_settings_are_saved_on_close_and_restored_with_voice_and_credit(
+    engine, tmp_path, monkeypatch
+):
+    import tkinter as tk
+
+    from shorthand_trainer import gui
+
+    engine.extra_talk = True
+    monkeypatch.setattr(gui, "output_devices", lambda: [(4, "テスト出力")])
+    errors = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *_a, **_k: errors.append(_a))
+    settings_path = tmp_path / "日本語 の 設定" / "settings.json"
+    root = tk.Tk()
+    root.withdraw()
+    first = gui.Application(root, settings_path=settings_path)
+    assert first.pattern.get() == ""
+    first.engine_url.set(engine.url)
+    first.connect()
+
+    def finish_connect(app):
+        deadline = time.monotonic() + 10
+        while app.busy and time.monotonic() < deadline:
+            app.root.update()
+            time.sleep(0.005)
+        assert not app.busy, errors
+
+    try:
+        finish_connect(first)
+        selected = next(v for v in first.voices if v.speaker_id == 9)
+        expected = {
+            "pattern": "[あいうえお]{2}",
+            "word_path": str(tmp_path / "単語.dic"),
+            "word_encoding": "CP932",
+            "article_path": str(tmp_path / "文章"),
+            "article_encoding": "UTF-8（BOM可）",
+            "regex": "^あ",
+            "order": "順出題",
+            "count": "12",
+            "duplicates": True,
+            "seed": "",
+            "engine_url": engine.url,
+            "voice_name": selected.label,
+            "credit": "VOICEVOX:テスト話者 / 追加の表記",
+            "speed_scale": "0.75",
+            "pause_cpm": "80",
+            "comma_pause": "1.2",
+            "sentence_pause": "3.4",
+            "log_root": str(tmp_path / "記録"),
+            "device_name": "4: テスト出力",
+        }
+        for name, value in expected.items():
+            getattr(first, name).set(value)
+        first.notebook.select(1)
+        assert not settings_path.exists()  # Editing alone does not write settings.
+    finally:
+        first.close()
+    assert settings_path.exists()
+    root = tk.Tk()
+    root.withdraw()
+    second = gui.Application(root, settings_path=settings_path)
+    try:
+        for name, value in expected.items():
+            assert getattr(second, name).get() == value
+        assert second.notebook.index("current") == 1
+        assert "読点 0.90秒" in second.speed_hint.get()
+        assert "句点・単語間 2.55秒" in second.speed_hint.get()
+        assert second.connected_url is None  # Restore inputs without starting network requests.
+        second.connect()
+        finish_connect(second)
+        assert second.voice_name.get() == selected.label
+        assert second.credit.get() == expected["credit"]
+        assert not errors
+    finally:
+        second.close()
+
+
+def test_unreadable_settings_do_not_prevent_startup_or_overwrite_the_original(
+    tmp_path, monkeypatch
+):
+    import tkinter as tk
+
+    from shorthand_trainer import gui
+
+    monkeypatch.setattr(gui, "output_devices", lambda: [])
+    path = tmp_path / "settings.json"
+    path.write_text("broken json", encoding="utf-8")
+    root = tk.Tk()
+    root.withdraw()
+    app = gui.Application(root, settings_path=path)
+    try:
+        assert app.pattern.get() == ""
+        assert "設定を読み込めません" in app.status.get()
+    finally:
+        app.close()
+    assert path.read_text(encoding="utf-8") == "broken json"

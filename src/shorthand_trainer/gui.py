@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from .playback import AudioPlayer, output_devices
 from .questions import QuestionOptions, generate_question
 from .sessions import PracticeSession
+from .settings import SettingsError, SettingsStore, default_settings_path
 from .voicevox import AudioSettings, Cancelled, VoicevoxClient, render_audio
 
 
@@ -19,7 +20,7 @@ def _clock(seconds):
 
 
 class Application:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, *, settings_path: Path | None = None):
         self.root = root
         root.title("速記トレーナー — 紙で学ぶ単語・文章練習")
         root.geometry(f"960x{min(860, max(600, root.winfo_screenheight() - 90))}")
@@ -33,7 +34,13 @@ class Application:
         self.voices = []
         self.connected_url = None
         self.devices = {"システム既定": None}
+        self.settings_store = SettingsStore(
+            settings_path if settings_path is not None else default_settings_path()
+        )
+        self.saved_settings = {}
+        self.save_settings_enabled = True
         self._build()
+        self._restore_settings()
         self._refresh_devices(quiet=True)
         self._refresh_controls()
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -82,12 +89,14 @@ class Application:
         self.notebook.add(pattern, text="単語：パターン生成")
         self.notebook.add(words, text="単語：TXT 読込")
         self.notebook.add(article, text="文章：TXT 読込")
-        self.pattern = tk.StringVar(value="[あかさたな]ん?[あかさたな]")
+        self.pattern = tk.StringVar()
         ttk.Label(pattern, text="生成パターン").grid(row=0, column=0, sticky="w")
         ttk.Entry(pattern, textvariable=self.pattern).grid(row=0, column=1, sticky="ew", padx=8)
         pattern.columnconfigure(1, weight=1)
         ttk.Label(
-            pattern, text="対応: ひらがな・ー・[あかさ]・[あ-お]・?・{2,4}・(あ|か)。空語は除外。"
+            pattern,
+            text="対応: ひらがな・ー・[あいう]・[あ-お]・?・{2,4}・(あ|い)。"
+            "1文字もない結果は出題しません。",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         self.word_path, self.word_encoding = self._path_controls(words, directory=False)
         self.article_path, self.article_encoding = self._path_controls(article, directory=True)
@@ -109,7 +118,7 @@ class Application:
             article, text="ディレクトリ直下の TXT から1本をランダムに選び、全文を読み上げます。"
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
 
-        options = ttk.Frame(main)
+        options = ttk.LabelFrame(main, text="単語設定", padding=8)
         options.pack(fill="x", pady=8)
         self.count = tk.StringVar(value="20")
         self.duplicates = tk.BooleanVar(value=False)
@@ -120,7 +129,7 @@ class Application:
         )
         self.count_widget.pack(side="left", padx=6)
         self.duplicates_widget = ttk.Checkbutton(
-            options, text="同じ表記の重複を許可", variable=self.duplicates
+            options, text="同じ単語の重複出題を許可する", variable=self.duplicates
         )
         self.duplicates_widget.pack(side="left", padx=8)
         ttk.Label(options, text="乱数シード（空欄は自動）").pack(side="left", padx=(12, 4))
@@ -151,9 +160,7 @@ class Application:
         ttk.Spinbox(
             speed, from_=0.5, to=2.0, increment=0.05, textvariable=self.speed_scale, width=6
         ).pack(side="left", padx=(0, 12))
-        ttk.Label(speed, text="0.5〜2.0倍・初期値1.0倍。分速への自動調整は行いません。").pack(
-            side="left"
-        )
+        ttk.Label(speed, text="0.5〜2.0倍・初期値1.0倍").pack(side="left")
         pauses = ttk.Frame(sound)
         pauses.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.pause_cpm = tk.StringVar(value="60")
@@ -177,6 +184,8 @@ class Application:
         ttk.Label(sound, textvariable=self.speed_hint).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
+        for variable in (self.pause_cpm, self.comma_pause, self.sentence_pause):
+            variable.trace_add("write", self._update_pause_hint)
         self._mode_changed()
 
         output = ttk.Frame(main)
@@ -247,6 +256,65 @@ class Application:
         scrollbar.configure(command=self.answer.yview)
         self._set_answer("問題文は反訳終了後に表示されます。")
 
+    def _settings_variables(self):
+        names = (
+            "pattern",
+            "word_path",
+            "word_encoding",
+            "article_path",
+            "article_encoding",
+            "regex",
+            "order",
+            "count",
+            "duplicates",
+            "seed",
+            "engine_url",
+            "voice_name",
+            "credit",
+            "speed_scale",
+            "pause_cpm",
+            "comma_pause",
+            "sentence_pause",
+            "log_root",
+            "device_name",
+        )
+        return {name: getattr(self, name) for name in names}
+
+    def _restore_settings(self):
+        try:
+            self.saved_settings = self.settings_store.load()
+        except (OSError, SettingsError) as exc:
+            self.save_settings_enabled = False
+            self.status.set(
+                f"前回の設定を読み込めません: {exc} 初期設定で起動します。"
+                f"元の設定は上書きしません: {self.settings_store.path}"
+            )
+            return
+        choices = {
+            "word_encoding": ("UTF-8（BOM可）", "CP932"),
+            "article_encoding": ("UTF-8（BOM可）", "CP932"),
+            "order": ("シャッフル", "順出題"),
+        }
+        for name, variable in self._settings_variables().items():
+            value = self.saved_settings.get(name)
+            if isinstance(variable, tk.BooleanVar):
+                if isinstance(value, bool):
+                    variable.set(value)
+            elif isinstance(value, str) and (name not in choices or value in choices[name]):
+                variable.set(value)
+        mode = self.saved_settings.get("mode")
+        if mode in ("pattern", "words", "article"):
+            self.notebook.select(("pattern", "words", "article").index(mode))
+        self._mode_changed()
+
+    def _save_settings(self):
+        if self.save_settings_enabled:
+            values = self.saved_settings | {
+                name: variable.get() for name, variable in self._settings_variables().items()
+            }
+            values["mode"] = ("pattern", "words", "article")[self.notebook.index("current")]
+            self.settings_store.save(values)
+
     def _path_controls(self, parent, *, directory):
         path, encoding = tk.StringVar(), tk.StringVar(value="UTF-8（BOM可）")
         parent.columnconfigure(1, weight=1)
@@ -281,11 +349,26 @@ class Application:
         if not hasattr(self, "speed_hint"):
             return
         article = self.notebook.index("current") == 2
-        self.speed_hint.set(
-            "分速は生成後に表示します。休止の換算基準を変えても、VOICEVOXの話速は変わりません。"
-        )
+        self._update_pause_hint()
         self.count_widget.state(["disabled"] if article else ["!disabled"])
         self.duplicates_widget.state(["disabled"] if article else ["!disabled"])
+
+    def _update_pause_hint(self, *_args):
+        try:
+            settings = AudioSettings(
+                pause_cpm=float(self.pause_cpm.get()),
+                comma_pause=float(self.comma_pause.get()),
+                sentence_pause=float(self.sentence_pause.get()),
+            )
+            settings.validate()
+        except ValueError:
+            self.speed_hint.set("休止の秒数は、換算基準と字分を入力すると表示します。")
+            return
+        self.speed_hint.set(
+            "休止（秒）= 字分 × 60 ÷ 換算基準　／　"
+            f"読点 {settings.comma_pause * 60 / settings.pause_cpm:.2f}秒　／　"
+            f"句点・単語間 {settings.sentence_pause * 60 / settings.pause_cpm:.2f}秒"
+        )
 
     def _choose_logs(self):
         selected = filedialog.askdirectory(parent=self.root)
@@ -368,12 +451,24 @@ class Application:
             return voices, version
 
         def done(result):
+            previous_voice = self.voice_name.get()
+            previous_credit = self.credit.get()
             self.voices, version = result
             self.connected_url = client.url
             self.voice_box.configure(values=[v.label for v in self.voices])
-            index = next((i for i, v in enumerate(self.voices) if v.style == "ノーマル"), 0)
+            matching = next(
+                (i for i, v in enumerate(self.voices) if v.label == previous_voice), None
+            )
+            index = (
+                matching
+                if matching is not None
+                else next((i for i, v in enumerate(self.voices) if v.style == "ノーマル"), 0)
+            )
             self.voice_box.current(index)
-            self._voice_changed()
+            if matching is not None and previous_credit:
+                self.credit.set(previous_credit)
+            else:
+                self._voice_changed()
             self.status.set(f"接続しました: VOICEVOX ENGINE {version} / {len(self.voices)}スタイル")
 
         self._background(work, done)
@@ -595,6 +690,10 @@ class Application:
                 self.session.abort()
             except OSError as exc:
                 self._error(f"終了時の記録を保存できませんでした: {exc}")
+        try:
+            self._save_settings()
+        except (OSError, SettingsError) as exc:
+            self._error(f"入力設定を保存できませんでした: {exc}")
         self.root.after_cancel(self.timer_id)
         self.root.destroy()
 

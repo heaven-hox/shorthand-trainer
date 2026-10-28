@@ -29,7 +29,7 @@ def read_text(path: Path, encoding: str) -> str:
 @dataclass(frozen=True)
 class QuestionOptions:
     mode: str = "pattern"
-    pattern: str = "[あかさたな]ん?[あかさたな]"
+    pattern: str = ""
     path: str = ""
     encoding: str = "utf-8-sig"
     regex: str = ""
@@ -72,6 +72,8 @@ def generate_question(options: QuestionOptions) -> Question:
         if not 1 <= options.count <= 10000:
             raise ValueError("出題数は1〜10000個にしてください。")
         if options.mode == "pattern":
+            if not options.pattern.strip():
+                raise ValueError("生成パターンを入力してください。")
             words = KanaPattern(options.pattern).sample(options.count, options.duplicates, rng)
         elif options.mode == "words":
             source = str(Path(options.path).expanduser().resolve())

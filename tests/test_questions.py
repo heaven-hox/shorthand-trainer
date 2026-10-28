@@ -62,3 +62,14 @@ def test_invalid_filter_is_a_user_error(tmp_path, regex):
 
 def test_count_policy_includes_small_kana_but_not_punctuation_or_spaces():
     assert character_count("「きゃく」、１２３。\n あ") == 7
+
+
+def test_pattern_is_required_without_assuming_a_shorthand_system():
+    assert QuestionOptions().pattern == ""
+    with pytest.raises(ValueError, match="生成パターンを入力"):
+        generate_question(QuestionOptions())
+
+
+def test_optional_n_keeps_n_and_excludes_only_the_zero_character_result():
+    question = generate_question(QuestionOptions(pattern="ん?", count=1))
+    assert question.words == ("ん",)

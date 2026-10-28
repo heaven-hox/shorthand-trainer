@@ -28,7 +28,7 @@ def pytest_collection_modifyitems(config, items):
 def engine():
     """A protocol fixture, not a real synthesizer. PCM is constant to identify silence."""
     state = SimpleNamespace(
-        requests=[], calibration_factor=1.0, empty_voices=False, voice_type="talk"
+        requests=[], calibration_factor=1.0, empty_voices=False, voice_type="talk", extra_talk=False
     )
 
     class Handler(BaseHTTPRequestHandler):
@@ -57,7 +57,12 @@ def engine():
                             "styles": [
                                 {"name": "ノーマル", "id": 7, "type": state.voice_type},
                                 {"name": "歌", "id": 8, "type": "sing"},
-                            ],
+                            ]
+                            + (
+                                [{"name": "別スタイル", "id": 9, "type": "talk"}]
+                                if state.extra_talk
+                                else []
+                            ),
                         }
                     ]
                 )
