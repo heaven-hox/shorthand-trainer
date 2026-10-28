@@ -47,17 +47,20 @@ def test_invalid_engine_urls_are_rejected(url):
         VoicevoxClient(url)
 
 
-def test_word_speed_and_intervals_are_independent_and_queries_are_cached(engine):
+@pytest.mark.parametrize("speed", [0.5, 1.0, 2.0])
+def test_manual_speed_preserves_engine_audio_and_intervals_and_caches_queries(engine, speed):
     q = generate_question(QuestionOptions(pattern="あか", count=3, duplicates=True, seed=1))
-    audio = render_audio(q, AudioSettings(120, 0.5, 2), engine.client, engine.voice)
-    assert audio.speech_seconds == pytest.approx(3, abs=0.01)
+    settings = AudioSettings(speed_scale=speed, sentence_pause=2, pause_cpm=120)
+    audio = render_audio(q, settings, engine.client, engine.voice)
+    assert audio.speech_seconds == pytest.approx(0.72 / speed, abs=0.001)
     assert audio.pause_seconds == 2
-    assert audio.duration == pytest.approx(5, abs=0.01)
-    assert audio.spoken_cpm == pytest.approx(120, rel=0.01)
-    assert audio.overall_cpm == pytest.approx(72, rel=0.01)
+    assert audio.duration == pytest.approx(0.72 / speed + 2, abs=0.001)
+    assert audio.spoken_cpm == pytest.approx(6 * 60 / audio.speech_seconds)
+    assert audio.overall_cpm == pytest.approx(6 * 60 / audio.duration)
     # Three spoken words, two one-second silent intervals, no trailing silence.
-    assert np.all(audio.samples[:24000] == 1000)
-    assert np.all(audio.samples[24000:48000] == 0)
+    spoken_frames = round(0.24 / speed * 24000)
+    assert np.all(audio.samples[:spoken_frames] == 1000)
+    assert np.all(audio.samples[spoken_frames : spoken_frames + 24000] == 0)
     assert audio.samples[-1] == 1000
     requests = [r for r in engine.requests if r[0] == "POST"]
     assert len([r for r in requests if r[1] == "/audio_query"]) == 1
@@ -66,28 +69,44 @@ def test_word_speed_and_intervals_are_independent_and_queries_are_cached(engine)
     assert synthesis["params"]["speaker"] == ["7"]
     assert synthesis["body"]["accent_phrases"][0]["pause_mora"] is None
     assert synthesis["body"]["prePhonemeLength"] == 0
+    assert synthesis["body"]["speedScale"] == speed
+    assert synthesis["body"]["accent_phrases"][0]["moras"][0]["vowel_length"] == 0.08
+    assert audio.speed_scale == speed
+    assert audio.metadata()["speed_mode"] == "manual"
+    assert "timing_error_fraction" not in audio.metadata()
 
 
-def test_article_targets_overall_speed_and_adjusts_measured_audio(engine):
+def test_article_reports_real_speed_without_recalibrating_or_stretching_audio(engine):
     engine.calibration_factor = 1.2
     question = Question("あか、さた。なか", (), 1, {"mode": "article"})
-    audio = render_audio(question, AudioSettings(60, 0.5, 1), engine.client, engine.voice)
-    assert audio.duration == pytest.approx(6, abs=0.01)
+    audio = render_audio(question, AudioSettings(1, 0.5, 1), engine.client, engine.voice)
+    assert audio.speech_seconds == pytest.approx(0.864, abs=0.001)
+    assert audio.duration == pytest.approx(2.364, abs=0.001)
     assert audio.pause_seconds == 1.5
-    assert audio.overall_cpm == pytest.approx(60, rel=0.01)
-    assert abs(audio.timing_error) < 0.01
+    assert audio.overall_cpm == pytest.approx(6 * 60 / 2.364)
     syntheses = [r for r in engine.requests if r[1] == "/synthesis"]
-    assert len(syntheses) == 6  # Three distinct chunks, calibrated twice.
+    assert len(syntheses) == 3  # Three distinct chunks, one synthesis each.
+    assert all(r[2]["body"]["speedScale"] == 1.0 for r in syntheses)
 
 
-def test_excessive_article_pauses_and_long_exercises_fail_before_network(engine):
+def test_long_exercises_fail_before_synthesis(engine):
     question = Question("あ。か", (), 1, {"mode": "article"})
-    with pytest.raises(ValueError, match="休止だけで"):
-        render_audio(question, AudioSettings(60, 0, 3), engine.client, engine.voice)
-    question = Question("あ" * 1801, (), 1, {"mode": "article"})
     with pytest.raises(ValueError, match="30分"):
-        render_audio(question, AudioSettings(60, 0, 0), engine.client, engine.voice)
+        render_audio(question, AudioSettings(1, 0, 30, pause_cpm=1), engine.client, engine.voice)
     assert not engine.requests
+    question = Question("あ" * 8000, (), 1, {"mode": "article"})
+    with pytest.raises(ValueError, match="30分"):
+        render_audio(question, AudioSettings(0.5, 0, 0), engine.client, engine.voice)
+    assert not any(r[1] == "/synthesis" for r in engine.requests)
+
+
+def test_actual_duration_limit_is_checked_before_allocating_pause_audio(engine):
+    engine.calibration_factor = 2
+    question = Question("あ。あ", (), 1, {"mode": "article"})
+    with pytest.raises(VoicevoxError, match="30分"):
+        render_audio(
+            question, AudioSettings(2, 0, 29.9975, pause_cpm=1), engine.client, engine.voice
+        )
 
 
 def test_cancel_is_checked_between_api_requests(engine):
@@ -126,7 +145,12 @@ def test_wav_round_trip_and_truncated_data():
     "settings",
     [
         AudioSettings(0),
+        AudioSettings(0.19158259995522037),
+        AudioSettings(0.49),
+        AudioSettings(2.01),
         AudioSettings(float("nan")),
+        AudioSettings(pause_cpm=0),
+        AudioSettings(pause_cpm=float("inf")),
         AudioSettings(sentence_pause=-1),
         replace(AudioSettings(), comma_pause=float("inf")),
     ],

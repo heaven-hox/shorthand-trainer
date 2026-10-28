@@ -22,7 +22,7 @@ class PracticeSession:
         self.clock = clock
         self.transcription_start = None
         self.record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": _now(),
             "state": "prepared",
             "outcome": None,

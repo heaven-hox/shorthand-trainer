@@ -122,13 +122,16 @@ class VoicevoxClient:
 
 @dataclass(frozen=True)
 class AudioSettings:
-    cpm: float = 60
+    speed_scale: float = 1.0
     comma_pause: float = 0.5
     sentence_pause: float = 2.0
+    pause_cpm: float = 60
 
     def validate(self):
-        if not math.isfinite(self.cpm) or not 1 <= self.cpm <= 600:
-            raise ValueError("速度は1〜600字／分にしてください。")
+        if not math.isfinite(self.speed_scale) or not 0.5 <= self.speed_scale <= 2.0:
+            raise ValueError("VOICEVOXの話速は0.5〜2.0倍にしてください。")
+        if not math.isfinite(self.pause_cpm) or not 1 <= self.pause_cpm <= 600:
+            raise ValueError("休止の換算基準は1〜600字／分にしてください。")
         if any(
             not math.isfinite(p) or not 0 <= p <= 30
             for p in (self.comma_pause, self.sentence_pause)
@@ -212,7 +215,6 @@ class RenderedAudio:
     voice: Voice
     engine_version: str
     engine_url: str
-    timing_error: float
 
     @property
     def duration(self):
@@ -240,7 +242,7 @@ class RenderedAudio:
             "overall_cpm": self.overall_cpm,
             "spoken_cpm": self.spoken_cpm,
             "speed_scale": self.speed_scale,
-            "timing_error_fraction": self.timing_error,
+            "speed_mode": "manual",
         }
 
 
@@ -263,14 +265,12 @@ def render_audio(
             progress(fraction, message)
 
     units = speech_units(question, settings)
-    pause_seconds = sum(u.pause_characters for u in units) * 60 / settings.cpm
-    target = question.characters * 60 / settings.cpm
-    speech_target = target if question.is_words else target - pause_seconds
-    duration_target = speech_target + pause_seconds
-    if speech_target <= 0:
-        raise ValueError("休止だけで目標時間を超えます。句読点の休止を短くしてください。")
-    if duration_target > 30 * 60:
-        raise ValueError("音声の上限は30分です。出題数を減らすか、速度を上げてください。")
+    rate = 24000
+    max_frames = 30 * 60 * rate
+    pause_frames = sum(round(u.pause_characters * 60 / settings.pause_cpm * rate) for u in units)
+    pause_seconds = pause_frames / rate
+    if pause_frames >= max_frames:
+        raise ValueError("音声の上限は30分です。出題数を減らすか、休止を短くしてください。")
     update(0, "エンジンを確認しています…")
     version = client.version()
     frequencies = Counter(u.text for u in units)
@@ -286,7 +286,7 @@ def render_audio(
             postPhonemeLength=0,
             outputSamplingRate=24000,
             outputStereo=False,
-            speedScale=1,
+            speedScale=settings.speed_scale,
         )
         predicted = 0.0
         try:
@@ -299,47 +299,36 @@ def render_audio(
         if not math.isfinite(predicted) or predicted <= 0:
             raise VoicevoxError(f"音声の読みを作れませんでした: {text[:40]!r}")
         predicted_seconds += predicted * count
+        if predicted_seconds / settings.speed_scale + pause_seconds > 30 * 60:
+            raise ValueError("音声の上限は30分です。出題数を減らすか、休止を短くしてください。")
         queries[text] = query
-    speed = min(10.0, max(0.1, predicted_seconds / speech_target))
     waves = {}
-    rate = 24000
-    speech_seconds = 0.0
-    for attempt in range(3):
-        for i, (text, query) in enumerate(queries.items()):
-            update(
-                0.25 + 0.7 * (attempt + i / len(queries)) / 3,
-                f"音声を生成しています ({i + 1}/{len(queries)}、調整{attempt + 1}/3)",
+    speech_frames = 0
+    for i, (text, query) in enumerate(queries.items()):
+        update(
+            0.25 + 0.7 * i / len(queries),
+            f"音声を生成しています ({i + 1}/{len(queries)}、話速{settings.speed_scale:g}倍)",
+        )
+        # Pass the user's native VOICEVOX speed through unchanged. Never stretch
+        # phonemes or retry with another speed to force a characters/minute target.
+        samples, actual_rate = decode_wav(client.synthesize(query, voice.speaker_id))
+        if actual_rate != rate:
+            raise VoicevoxError("エンジンが指定と異なるサンプルレートを返しました。")
+        speech_frames += len(samples) * frequencies[text]
+        if speech_frames + pause_frames > max_frames:
+            raise VoicevoxError(
+                "生成音声が30分を超えます。問題を短くするか、休止を短くしてください。"
             )
-            query["speedScale"] = speed
-            samples, actual_rate = decode_wav(client.synthesize(query, voice.speaker_id))
-            if actual_rate != rate:
-                raise VoicevoxError("エンジンが指定と異なるサンプルレートを返しました。")
-            waves[text] = samples
-        speech_seconds = sum(len(waves[t]) * n for t, n in frequencies.items()) / rate
-        error = (speech_seconds - speech_target) / speech_target
-        if abs(error) <= 0.03:
-            break
-        adjusted = min(10.0, max(0.1, speed * speech_seconds / speech_target))
-        if attempt == 2 or abs(adjusted - speed) < 0.0001:
-            break
-        speed = adjusted
+        waves[text] = samples
+    speech_seconds = speech_frames / rate
     update(0.96, "休止を挿入しています…")
     parts = []
-    pause_frames = 0
     for unit in units:
         parts.append(waves[unit.text])
-        frames = round(unit.pause_characters * 60 / settings.cpm * rate)
+        frames = round(unit.pause_characters * 60 / settings.pause_cpm * rate)
         if frames:
             parts.append(np.zeros(frames, dtype=np.int16))
-            pause_frames += frames
     samples = np.concatenate(parts)
-    if len(samples) / rate > 31 * 60:
-        raise VoicevoxError("生成音声が長すぎます。問題を短くするか、速度を上げてください。")
-    error = (
-        (speech_seconds - speech_target) / speech_target
-        if question.is_words
-        else (len(samples) / rate - duration_target) / duration_target
-    )
     update(1, "音声を準備しました。")
     return RenderedAudio(
         samples,
@@ -347,10 +336,9 @@ def render_audio(
         speech_seconds,
         pause_frames / rate,
         question.characters,
-        speed,
+        settings.speed_scale,
         settings,
         voice,
         version,
         client.url,
-        error,
     )

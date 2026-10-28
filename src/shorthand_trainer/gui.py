@@ -146,18 +146,28 @@ class Application:
         )
         speed = ttk.Frame(sound)
         speed.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.cpm = tk.StringVar(value="60")
+        self.speed_scale = tk.StringVar(value="1.0")
+        ttk.Label(speed, text="VOICEVOX話速（倍率）").pack(side="left", padx=(0, 4))
+        ttk.Spinbox(
+            speed, from_=0.5, to=2.0, increment=0.05, textvariable=self.speed_scale, width=6
+        ).pack(side="left", padx=(0, 12))
+        ttk.Label(speed, text="0.5〜2.0倍・初期値1.0倍。分速への自動調整は行いません。").pack(
+            side="left"
+        )
+        pauses = ttk.Frame(sound)
+        pauses.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.pause_cpm = tk.StringVar(value="60")
         self.comma_pause = tk.StringVar(value="0.5")
         self.sentence_pause = tk.StringVar(value="2.0")
         for label, variable, upper, increment in (
-            ("速度（字／分）", self.cpm, 600, 1),
+            ("休止の換算基準（字／分）", self.pause_cpm, 600, 1),
             ("読点の休止（字分）", self.comma_pause, 30, 0.1),
             ("句点・単語間（字分）", self.sentence_pause, 30, 0.1),
         ):
-            ttk.Label(speed, text=label).pack(side="left", padx=(0, 4))
+            ttk.Label(pauses, text=label).pack(side="left", padx=(0, 4))
             ttk.Spinbox(
-                speed,
-                from_=1 if variable is self.cpm else 0,
+                pauses,
+                from_=1 if variable is self.pause_cpm else 0,
                 to=upper,
                 increment=increment,
                 textvariable=variable,
@@ -165,7 +175,7 @@ class Application:
             ).pack(side="left", padx=(0, 12))
         self.speed_hint = tk.StringVar()
         ttk.Label(sound, textvariable=self.speed_hint).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            row=5, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
         self._mode_changed()
 
@@ -182,6 +192,12 @@ class Application:
         actions.pack(fill="x")
         self.generate_button = ttk.Button(actions, text="問題・音声を生成", command=self.generate)
         self.generate_button.pack(side="left")
+        self.regenerate_button = ttk.Button(
+            actions,
+            text="同じ問題で音声を再生成",
+            command=lambda: self.generate(reuse_question=True),
+        )
+        self.regenerate_button.pack(side="left", padx=8)
         self.cancel_button = ttk.Button(actions, text="生成をキャンセル", command=self.cancel.set)
         self.cancel_button.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(actions, maximum=1)
@@ -266,9 +282,7 @@ class Application:
             return
         article = self.notebook.index("current") == 2
         self.speed_hint.set(
-            "文章: 指定速度は休止込みの目標分速です。"
-            if article
-            else "単語: 指定速度は休止を除く読みの速度です。単語間は句点の休止を適用します。"
+            "分速は生成後に表示します。休止の換算基準を変えても、VOICEVOXの話速は変わりません。"
         )
         self.count_widget.state(["disabled"] if article else ["!disabled"])
         self.duplicates_widget.state(["disabled"] if article else ["!disabled"])
@@ -302,6 +316,7 @@ class Application:
         enabled = {
             self.connect_button: not self.busy and not active,
             self.generate_button: not self.busy and not active,
+            self.regenerate_button: not self.busy and not active and self.session is not None,
             self.cancel_button: self.busy,
             self.play_button: not self.busy and state == "prepared",
             self.pause_button: state in ("playing", "paused"),
@@ -368,8 +383,15 @@ class Application:
         if voice:
             self.credit.set(voice.credit)
 
-    def generate(self):
+    def generate(self, *, reuse_question=False):
+        if self.busy or (
+            self.session and self.session.state in ("playing", "paused", "transcribing")
+        ):
+            return
         try:
+            reused = self.session.question if reuse_question and self.session else None
+            if reuse_question and reused is None:
+                raise ValueError("先に問題を生成してください。")
             client = VoicevoxClient(self.engine_url.get())
             voice = next((v for v in self.voices if v.label == self.voice_name.get()), None)
             if voice is None or client.url != self.connected_url:
@@ -377,28 +399,31 @@ class Application:
             if not self.credit.get().strip():
                 raise ValueError("選択した声のクレジットを入力してください。")
             voice = replace(voice, credit_text=self.credit.get().strip())
-            mode = ("pattern", "words", "article")[self.notebook.index("current")]
-            path = self.article_path.get() if mode == "article" else self.word_path.get()
-            if mode != "pattern" and not path.strip():
-                raise ValueError("読み込む TXT またはディレクトリを指定してください。")
-            encoding = (
-                self.article_encoding.get() if mode == "article" else self.word_encoding.get()
-            )
-            options = QuestionOptions(
-                mode=mode,
-                pattern=self.pattern.get(),
-                path=path,
-                encoding="cp932" if encoding == "CP932" else "utf-8-sig",
-                regex=self.regex.get(),
-                count=int(self.count.get()) if mode != "article" else 1,
-                duplicates=self.duplicates.get(),
-                order="sequential" if self.order.get() == "順出題" else "shuffle",
-                seed=int(self.seed.get()) if self.seed.get().strip() else None,
-            )
+            options = None
+            if reused is None:
+                mode = ("pattern", "words", "article")[self.notebook.index("current")]
+                path = self.article_path.get() if mode == "article" else self.word_path.get()
+                if mode != "pattern" and not path.strip():
+                    raise ValueError("読み込む TXT またはディレクトリを指定してください。")
+                encoding = (
+                    self.article_encoding.get() if mode == "article" else self.word_encoding.get()
+                )
+                options = QuestionOptions(
+                    mode=mode,
+                    pattern=self.pattern.get(),
+                    path=path,
+                    encoding="cp932" if encoding == "CP932" else "utf-8-sig",
+                    regex=self.regex.get(),
+                    count=int(self.count.get()) if mode != "article" else 1,
+                    duplicates=self.duplicates.get(),
+                    order="sequential" if self.order.get() == "順出題" else "shuffle",
+                    seed=int(self.seed.get()) if self.seed.get().strip() else None,
+                )
             settings = AudioSettings(
-                float(self.cpm.get()),
-                float(self.comma_pause.get()),
-                float(self.sentence_pause.get()),
+                speed_scale=float(self.speed_scale.get()),
+                comma_pause=float(self.comma_pause.get()),
+                sentence_pause=float(self.sentence_pause.get()),
+                pause_cpm=float(self.pause_cpm.get()),
             )
             settings.validate()
             if not self.log_root.get().strip():
@@ -411,7 +436,7 @@ class Application:
         self.status.set("問題を生成しています…")
 
         def work():
-            question = generate_question(options)
+            question = reused if reused is not None else generate_question(options)
             audio = render_audio(
                 question,
                 settings,
@@ -440,14 +465,12 @@ class Application:
             self.play_progress["value"] = 0
             self.elapsed.set("反訳 00:00")
             audio = session.audio
-            metric = "読みの目標" if session.question.is_words else "休止込みの目標"
             summary = (
-                f"{session.question.characters}字 / 音声 {_clock(audio.duration)} / "
-                f"{metric} {settings.cpm:g}字/分 / "
-                f"実測: 読み {audio.spoken_cpm:.1f}、休止込み {audio.overall_cpm:.1f}字/分"
+                f"{session.question.characters}字 / 音声 {audio.duration:.2f}秒 "
+                f"({_clock(audio.duration)}) / VOICEVOX話速 {audio.speed_scale:g}倍\n"
+                f"実測分速: 休止除く {audio.spoken_cpm:.1f}、休止込み {audio.overall_cpm:.1f}字/分 "
+                f"/ 休止合計 {audio.pause_seconds:.2f}秒"
             )
-            if abs(audio.timing_error) > 0.05:
-                summary += "\n※話速の調整範囲等により、目標時間との差が5%を超えています。"
             self.summary.set(summary)
             self.status.set(f"準備完了。再生して練習を開始できます。保存先: {session.directory}")
 

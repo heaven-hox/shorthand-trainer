@@ -26,6 +26,10 @@ def test_practice_lifecycle_keeps_answer_hidden_until_transcription(engine, tmp_
     now[0] += 13.5
     assert session.reveal() == question.text
     record = json.loads((session.directory / "session.json").read_text(encoding="utf-8"))
+    assert record["schema_version"] == 2
+    assert record["audio"]["speed_mode"] == "manual"
+    assert record["audio"]["settings"]["speed_scale"] == 1.0
+    assert record["audio"]["settings"]["pause_cpm"] == 60
     assert record["outcome"] == "completed"
     assert record["state"] == "revealed"
     assert record["transcription_seconds"] == 13.5

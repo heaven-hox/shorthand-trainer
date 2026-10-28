@@ -1,6 +1,6 @@
 [project]
 name = "shorthand-trainer"
-version = "0.1.0"
+version = "0.1.1"
 description = "方式に依存しない、紙で学ぶ日本語速記の練習アプリ"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
